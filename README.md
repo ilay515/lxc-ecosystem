@@ -85,17 +85,6 @@ Creates and boots an LXC container based on `config.yaml`:
 python3 create_lxc.py
 ```
 
-#### Custom Docker Template (`debian-12-docker.tar.zst`)
-A custom Proxmox appliance template has been built and registered under `local:vztmpl/debian-12-docker.tar.zst`:
-* **Docker Engine & containerd:** Pre-installed and systemd-enabled.
-* **Pre-cached Images:** `nginx:alpine` and `alpine:latest` pre-loaded in local Docker storage.
-* Any container created with this template in `config.yaml` boots up with Docker and cached images ready to use instantly.
-
-To bake a new custom template from any running container:
-```bash
-python3 create_docker_template.py
-```
-
 #### Check Container Status
 ```bash
 python3 create_lxc.py --status 100
@@ -110,23 +99,100 @@ python3 create_lxc.py --destroy 100
 
 ---
 
-## Accessing Container TTY Shells
+## Running Docker Inside Proxmox LXC
 
-Connect directly to any container's root shell from your host machine:
+This project provides end-to-end support for running Docker Engine and containerized applications inside **unprivileged Debian 12 LXC containers**.
+
+### Technical Requirements for Docker in LXC
+Running Docker inside unprivileged LXC containers in Proxmox VE requires specific configuration:
+1. **`nesting=1`**: Enables nested container namespaces and cgroup delegation so Docker can spawn child containers.
+2. **`keyctl=1`**: Enables kernel key management inside unprivileged namespaces (required by Docker/systemd).
+3. **`lxc.apparmor.profile: unconfined`**: Overrides default AppArmor restrictions that block `runc` from configuring network sysctls (such as `net.ipv4.ip_unprivileged_port_start`).
+
+> [!NOTE]
+> All automation scripts in this repository (`create_lxc.py`, `provision_docker_lxc.py`) configure these settings automatically.
+
+---
+
+### Two Ways to Deploy Docker LXC
+
+#### 1. Instant Deployment via Pre-baked Template (Recommended)
+A custom appliance template [`local:vztmpl/debian-12-docker.tar.zst`](file:///var/lib/vz/template/cache/debian-12-docker.tar.zst) is registered in Proxmox storage. It contains:
+* Pre-installed Docker CE, containerd, and Docker Compose plugin.
+* Docker service pre-enabled on systemd boot.
+* Pre-cached Docker images: `nginx:alpine` and `alpine:latest`.
+
+**Deploy in seconds:**
+1. Set the template in `config.yaml`:
+   ```yaml
+   container:
+     vmid: null                          # auto-allocates next ID (e.g. 103)
+     hostname: "my-docker-app"
+     ostemplate: "debian-12-docker.tar.zst"
+   ```
+2. Provision with the CLI:
+   ```bash
+   python3 create_lxc.py
+   ```
+The container boots with the `docker0` bridge active and images ready to launch offline without downloading anything.
+
+---
+
+#### 2. Fresh Installation from Scratch (`provision_docker_lxc.py`)
+To build a Docker LXC from a standard minimal Debian 12 template:
+```bash
+python3 provision_docker_lxc.py
+```
+This script:
+* Provisions an LXC container (`VMID 101`).
+* Configures `nesting=1`, `keyctl=1`, and AppArmor unconfined.
+* Adds Docker’s official Debian repository and GPG keys.
+* Installs `docker-ce`, `docker-ce-cli`, `containerd.io`, and Docker Compose.
+* Starts an `nginx:alpine` container on port 80 and verifies connectivity.
+
+---
+
+### Creating Your Own Custom Docker Templates
+
+You can bake any container (with its installed packages and cached Docker images) into a reusable Proxmox template:
 
 ```bash
-# Enter base Debian container (VMID 100)
-ssh -p 2222 -t root@localhost "pct enter 100"
-
-# Enter Docker container host (VMID 101)
-ssh -p 2222 -t root@localhost "pct enter 101"
+python3 create_docker_template.py --vmid 101 --name debian-12-custom.tar.zst --images nginx:alpine redis:alpine
 ```
 
-Inside Container 101, you can interact directly with Docker:
+**How it works under the hood:**
+1. Connects to Proxmox VE via SSH.
+2. Pulls requested Docker images inside the source container.
+3. Cleans temporary files, package caches, bash history, and truncates `/etc/machine-id` (so every spawned container receives a unique identity).
+4. Streams a rootfs archive from inside the container (preserving standard `0:0` UID/GID ownership) directly into `zstd` compression on the Proxmox host.
+5. Saves the `.tar.zst` into `/var/lib/vz/template/cache/`, making it instantly selectable in `pveam` and `config.yaml`.
+
+---
+
+## Interacting with Docker Containers
+
+### Connect to LXC Shell (TTY)
 ```bash
+# Connect to your Docker container host
+ssh -p 2222 -t root@localhost "pct enter 103"
+```
+
+### Run Docker Commands Inside LXC
+Once inside the container shell:
+```bash
+# Check Docker daemon status & pre-cached images
+docker info
+docker images
+
+# Run a container from the pre-cached image
+docker run -d --name web -p 80:80 nginx:alpine
+
+# Verify running container & test HTTP
 docker ps
-docker logs web-nginx
-docker exec -it web-nginx sh
+curl -I http://localhost:80
+
+# Execute commands inside the Docker container
+docker exec -it web sh
 ```
 
 ---
