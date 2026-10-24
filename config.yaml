@@ -1,0 +1,26 @@
+proxmox:
+  node: "pve"
+  storage: "local-lvm"
+  template_storage: "local"
+
+container:
+  vmid: null
+  hostname: "instant-docker-lxc"
+  ostemplate: "debian-12-docker.tar.zst"
+  description: "LXC container created from custom Docker template"
+  cores: 2
+  memory: 2048
+  swap: 512
+  disk_size: "16G"
+  unprivileged: true
+  nesting: true
+  keyctl: true
+  start_after_create: true
+  ssh_public_key: ""
+
+network:
+  interface: "eth0"
+  bridge: "vmbr0"
+  ip: "dhcp"
+  gateway: ""
+  firewall: true

@@ -1,4 +1,11 @@
-# Byte-compiled / optimized / DLL files
+# Project-specific ignores
+.venv/
+images/
+.env
+id_pve
+id_pve.pub
+__pycache__/
+*.pyc
 __pycache__/
 *.py[codz]
 *$py.class

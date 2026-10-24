@@ -1,0 +1,25 @@
+proxmox:
+  node: "pve"                  # Proxmox node name
+  storage: "local-lvm"         # Storage pool for root disk
+  template_storage: "local"    # Storage holding .tar.zst templates
+
+container:
+  vmid: null                   # null = auto-allocate next available ID
+  hostname: "debian12-lxc"
+  ostemplate: "debian-12-docker.tar.zst"  # or debian-12-standard_12.12-1_amd64.tar.zst
+  description: "Debian 12 container managed via lxctest automation"
+  cores: 2                     # CPU cores
+  memory: 2048                 # RAM in MB
+  swap: 512                    # Swap in MB
+  disk_size: "16G"             # Rootfs size
+  unprivileged: true           # Unprivileged container
+  nesting: true                # Enable systemd / Docker nesting
+  start_after_create: true
+  ssh_public_key: ""           # Optional path to public SSH key
+
+network:
+  interface: "eth0"
+  bridge: "vmbr0"
+  ip: "dhcp"
+  gateway: ""
+  firewall: true
