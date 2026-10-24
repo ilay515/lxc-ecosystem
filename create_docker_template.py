@@ -1,53 +1,32 @@
 #!/usr/bin/env python3
 """
 create_docker_template.py - Creates a custom Proxmox LXC appliance template (.tar.zst)
-from container 101 with Docker and pre-pulled images included.
+from an existing container with Docker and pre-pulled images included.
 """
 
-import sys
+import argparse
 import time
-import paramiko
+from pve_utils import get_ssh_client, exec_ssh
 
-SSH_HOST = "127.0.0.1"
-SSH_PORT = 2222
-SSH_USER = "root"
-SSH_PASS = "12345678"
 
-SOURCE_VMID = 101
-TEMPLATE_NAME = "debian-12-docker.tar.zst"
-TEMPLATE_DIR = "/var/lib/vz/template/cache"
-
-def exec_ssh(client, cmd, check=True):
-    print(f">> [PVE Host] {cmd}")
-    stdin, stdout, stderr = client.exec_command(cmd)
-    out = stdout.read().decode()
-    err = stderr.read().decode()
-    exit_code = stdout.channel.recv_exit_status()
-    if check and exit_code != 0:
-        print(f"Error (exit {exit_code}):\nSTDOUT: {out}\nSTDERR: {err}", file=sys.stderr)
-        raise RuntimeError(f"Command failed: {cmd}")
-    return out, err, exit_code
-
-def main():
-    print(f"Connecting to Proxmox VE via SSH ({SSH_HOST}:{SSH_PORT})...")
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(SSH_HOST, port=SSH_PORT, username=SSH_USER, password=SSH_PASS, timeout=10)
+def create_template(source_vmid, template_name, images, template_dir="/var/lib/vz/template/cache"):
+    print(f"Connecting to Proxmox VE via SSH...")
+    ssh = get_ssh_client()
     print("SSH connected!")
 
     # 1. Start source container if stopped
-    out, _, _ = exec_ssh(ssh, f"pct status {SOURCE_VMID}", check=False)
+    out, _, _ = exec_ssh(ssh, f"pct status {source_vmid}", check=False)
     if "running" not in out:
-        print(f"Starting source container {SOURCE_VMID}...")
-        exec_ssh(ssh, f"pct start {SOURCE_VMID}")
+        print(f"Starting source container {source_vmid}...")
+        exec_ssh(ssh, f"pct start {source_vmid}")
         time.sleep(5)
 
-    # 2. Inside container: pull images and ensure docker service is enabled
-    print("Preparing container: pulling Docker images and cleaning system...")
-    prep_script = """
+    # 2. Inside container: pull images and clean system
+    image_pull_cmds = "\n".join([f"    docker pull {img}" for img in images])
+    print(f"Preparing container {source_vmid}: pulling Docker images ({', '.join(images)}) and cleaning system...")
+    prep_script = f"""
     systemctl start docker
-    docker pull nginx:alpine
-    docker pull alpine:latest
+{image_pull_cmds}
     docker rm -f $(docker ps -aq) 2>/dev/null || true
     systemctl stop docker
     systemctl enable docker
@@ -57,12 +36,17 @@ def main():
     rm -f /etc/resolv.conf
     rm -f /root/.bash_history
     """
-    exec_ssh(ssh, f"pct exec {SOURCE_VMID} -- bash -c '{prep_script}'")
+    exec_ssh(ssh, f"pct exec {source_vmid} -- bash -c '{prep_script}'")
 
     # 3. Create the template tarball: stream tar from container into zstd on PVE host
-    dest_tar = f"{TEMPLATE_DIR}/{TEMPLATE_NAME}"
+    dest_tar = f"{template_dir}/{template_name}"
     print(f"Streaming rootfs archive into {dest_tar}...")
-    tar_pipe_cmd = f"pct exec {SOURCE_VMID} -- tar --numeric-owner --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' --exclude='./tmp/*' --exclude='./run/*' -cf - -C / . | zstd -T0 -1 -o {dest_tar} -f"
+    tar_pipe_cmd = (
+        f"pct exec {source_vmid} -- tar --numeric-owner "
+        f"--exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' "
+        f"--exclude='./tmp/*' --exclude='./run/*' -cf - -C / . "
+        f"| zstd -T0 -1 -o {dest_tar} -f"
+    )
     exec_ssh(ssh, tar_pipe_cmd)
     exec_ssh(ssh, f"chmod 644 {dest_tar}")
 
@@ -73,9 +57,20 @@ def main():
 
     ssh.close()
     print("===================================================================")
-    print(f" SUCCESS: Custom template created: {TEMPLATE_NAME}")
-    print(f" Available in Proxmox storage as: local:vztmpl/{TEMPLATE_NAME}")
+    print(f" SUCCESS: Custom template created: {template_name}")
+    print(f" Available in Proxmox storage as: local:vztmpl/{template_name}")
     print("===================================================================")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Create custom Proxmox LXC appliance template (.tar.zst) with Docker")
+    parser.add_argument("--vmid", type=int, default=101, help="Source container VMID (default: 101)")
+    parser.add_argument("--name", default="debian-12-docker.tar.zst", help="Template filename (default: debian-12-docker.tar.zst)")
+    parser.add_argument("--images", nargs="+", default=["nginx:alpine", "alpine:latest"], help="Docker images to pre-cache")
+    args = parser.parse_args()
+
+    create_template(args.vmid, args.name, args.images)
+
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,4 @@
-# lxctest - Proxmox VE VM & LXC Container Automation
+# lxc-ecosystem - Proxmox VE VM & LXC Container Automation
 
 Automated provisioning of a local **Proxmox VE 8** virtual machine (using QEMU/KVM) and declarative management of unprivileged **Debian 12 LXC containers** via the Proxmox REST API using Python.
 
@@ -15,8 +15,9 @@ flowchart TD
     end
 
     subgraph PVE["Inside Proxmox VE VM"]
-        D -->|pveam / pct| F["Debian 12 LXC Container (VMID 100)"]
-        G["Template: debian-12-standard"] --> F
+        D -->|pveam / pct| F["LXC Container (e.g. instant-docker-lxc)"]
+        G["Custom Template: debian-12-docker.tar.zst"] --> F
+        F -->|Docker Engine| H["Containerized Apps (e.g. Nginx)"]
     end
 ```
 
@@ -30,7 +31,7 @@ The Proxmox VE VM runs locally with KVM acceleration and user-mode networking. P
 |---|---|---|
 | **Proxmox Web UI** | [https://localhost:8006](https://localhost:8006) | User: `root`, Realm: `Linux PAM` |
 | **Proxmox REST API** | `https://localhost:8006/api2/json` | Authenticated via `PVEAPIToken` in `.env` |
-| **SSH to Proxmox Host** | `ssh -p 2222 root@localhost` | User: `root` |
+| **SSH to Proxmox Host** | `ssh -p 2222 root@localhost` | User: `root` (or key `id_pve`) |
 | **VNC Fallback Display** | `127.0.0.1:5900` | (Accessible via `remote-viewer vnc://127.0.0.1:5900`) |
 
 ---
@@ -38,19 +39,20 @@ The Proxmox VE VM runs locally with KVM acceleration and user-mode networking. P
 ## Directory Structure
 
 ```
-/home/ilay/projects/lxctest/
-├── .venv/                 # Python virtual environment
-├── images/                # VM disk image (pve-disk.qcow2) and ISO
-├── .env                   # Proxmox API token credentials (active)
-├── .env.example           # Example environment template
-├── config.yaml            # Container specification (active)
-├── config.example.yaml    # Example container configuration
-├── create_lxc.py          # Proxmox REST API container automation script
-├── setup_pve.py           # Helper script to configure API token & download templates
-├── start_vm.sh            # Script to boot the Proxmox VE VM
-├── requirements.txt       # Python dependencies
-├── PLAN.md                # Detailed step-by-step implementation plan
-└── README.md              # Documentation (this file)
+lxc-ecosystem/
+├── images/                   # VM disk image (pve-disk.qcow2) and ISO (git ignored)
+├── .env.example              # Credentials & SSH config template
+├── config.example.yaml       # Example container specification
+├── config.yaml               # Active container specification
+├── create_lxc.py             # Main CLI: Proxmox REST API container automation
+├── create_docker_template.py # Creates custom .tar.zst template with pre-cached Docker images
+├── provision_docker_lxc.py   # Full pipeline to build Docker LXC from base template
+├── pve_utils.py              # Shared SSH and execution helpers
+├── setup_pve.py              # One-time initialization script (API token + template download)
+├── start_vm.sh               # Boots Proxmox VE in QEMU/KVM with user port forwards
+├── requirements.txt          # Python dependencies
+├── PLAN.md                   # Step-by-step implementation plan
+└── README.md                 # Full documentation
 ```
 
 ---

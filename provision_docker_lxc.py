@@ -3,34 +3,13 @@
 provision_docker_lxc.py - Provisions an LXC container and installs Docker & a Docker container inside it.
 """
 
-import sys
 import time
-import paramiko
 from create_lxc import load_env, load_config, get_client
-
-SSH_HOST = "127.0.0.1"
-SSH_PORT = 2222
-SSH_USER = "root"
-SSH_PASS = "12345678"
+from pve_utils import get_ssh_client, exec_ssh, exec_in_lxc
 
 DOCKER_VMID = 101
 DOCKER_HOSTNAME = "docker-lxc"
 
-def exec_ssh(client, cmd, check=True):
-    print(f">> [PVE Host] {cmd}")
-    stdin, stdout, stderr = client.exec_command(cmd)
-    out = stdout.read().decode()
-    err = stderr.read().decode()
-    exit_code = stdout.channel.recv_exit_status()
-    if check and exit_code != 0:
-        print(f"Command failed (exit {exit_code}):\nSTDOUT: {out}\nSTDERR: {err}", file=sys.stderr)
-        raise RuntimeError(f"SSH command failed with exit {exit_code}")
-    return out, err, exit_code
-
-def exec_in_lxc(ssh_client, vmid, cmd, check=True):
-    # Escape quotes properly for pct exec
-    wrapped = f"pct exec {vmid} -- bash -c {repr(cmd)}"
-    return exec_ssh(ssh_client, wrapped, check=check)
 
 def main():
     env = load_env(".env")
@@ -74,12 +53,10 @@ def main():
     print(f"LXC Container {DOCKER_VMID} created successfully!")
 
     print(f"\n=== 3. Connecting to Proxmox VE over SSH ===")
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(SSH_HOST, port=SSH_PORT, username=SSH_USER, password=SSH_PASS, timeout=15)
+    ssh = get_ssh_client(env)
     print("SSH connected!")
 
-    # Enable keyctl=1 and nesting=1 and apparmor unconfined for Docker inside LXC
+    # Enable keyctl=1, nesting=1, and apparmor unconfined for Docker inside LXC
     print("Configuring LXC for Docker (features: nesting=1,keyctl=1, lxc.apparmor.profile: unconfined)...")
     exec_ssh(ssh, f"pct set {DOCKER_VMID} --features nesting=1,keyctl=1")
     exec_ssh(ssh, f"grep -q 'lxc.apparmor.profile: unconfined' /etc/pve/lxc/{DOCKER_VMID}.conf || echo 'lxc.apparmor.profile: unconfined' >> /etc/pve/lxc/{DOCKER_VMID}.conf")
@@ -98,45 +75,36 @@ def main():
     print(f"Container IP inside PVE network: {ct_ip}")
 
     print(f"\n=== 4. Installing Docker inside container {DOCKER_VMID} ===")
-    # 4.1 Update APT & install prerequisites
     print("Updating APT & installing dependencies (curl, ca-certificates, gnupg)...")
     exec_in_lxc(ssh, DOCKER_VMID, "apt-get update && apt-get install -y ca-certificates curl gnupg lsb-release")
 
-    # 4.2 Add Docker GPG key
     print("Adding Docker official GPG key...")
     exec_in_lxc(ssh, DOCKER_VMID, "install -m 0755 -d /etc/apt/keyrings")
     exec_in_lxc(ssh, DOCKER_VMID, "curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes")
     exec_in_lxc(ssh, DOCKER_VMID, "chmod a+r /etc/apt/keyrings/docker.gpg")
 
-    # 4.3 Add Docker repository
     print("Configuring Docker APT repository...")
     repo_cmd = 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list'
     exec_in_lxc(ssh, DOCKER_VMID, repo_cmd)
 
-    # 4.4 Install Docker packages
     print("Installing Docker Engine, containerd, and Docker Compose...")
     exec_in_lxc(ssh, DOCKER_VMID, "apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin")
 
-    # 4.5 Start & enable Docker
     print("Enabling and starting Docker service...")
     exec_in_lxc(ssh, DOCKER_VMID, "systemctl enable --now docker")
 
-    # 4.6 Verify Docker daemon
     out, _, _ = exec_in_lxc(ssh, DOCKER_VMID, "docker --version")
     print(f"Installed: {out.strip()}")
 
     print(f"\n=== 5. Launching a Docker container inside the LXC container ===")
-    # Run an Nginx web server container inside the LXC container
     print("Running Docker container 'web-nginx' (nginx:alpine on port 80)...")
     exec_in_lxc(ssh, DOCKER_VMID, "docker rm -f web-nginx 2>/dev/null || true")
     exec_in_lxc(ssh, DOCKER_VMID, "docker run -d --name web-nginx -p 80:80 --restart unless-stopped nginx:alpine")
 
-    # Verify docker ps
     out, _, _ = exec_in_lxc(ssh, DOCKER_VMID, "docker ps --format 'table {{.ID}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'")
     print("\nRunning Docker containers inside LXC:")
     print(out)
 
-    # Test HTTP response from inside LXC
     print("Testing HTTP response from the Docker container...")
     out, _, _ = exec_in_lxc(ssh, DOCKER_VMID, "curl -sI http://localhost:80 | head -n 5")
     print(out)
@@ -147,6 +115,7 @@ def main():
     print(f" Docker Engine and 'nginx:alpine' container are fully operational!")
     print(f" Access container shell with: ssh -p 2222 -t root@localhost \"pct enter {DOCKER_VMID}\"")
     print("===================================================================")
+
 
 if __name__ == "__main__":
     main()

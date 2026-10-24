@@ -1,93 +1,103 @@
 #!/usr/bin/env python3
-import sys
-import paramiko
-import re
+"""
+setup_pve.py - Initial setup script for Proxmox VE VM:
+1. Installs local SSH key for passwordless automation
+2. Generates the Proxmox API Token (root@pam!lxc-token)
+3. Updates the appliance catalog and downloads default Debian 12 template
+4. Generates .env and config.yaml
+"""
 
-HOST = "127.0.0.1"
-PORT = 2222
-USER = "root"
-PASSWORD = "12345678"
+import os
+import sys
+import subprocess
+import re
+from pve_utils import get_ssh_client, exec_ssh
+
+KEY_FILE = "id_pve"
+
+
+def ensure_local_ssh_key():
+    """Generates an ed25519 keypair if none exists."""
+    if not os.path.exists(KEY_FILE):
+        print(f"Generating dedicated SSH keypair ({KEY_FILE})...")
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", KEY_FILE],
+            check=True, stdout=subprocess.DEVNULL
+        )
+
 
 def main():
-    print(f"Connecting to Proxmox VE via SSH ({HOST}:{PORT})...")
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    
-    try:
-        client.connect(HOST, port=PORT, username=USER, password=PASSWORD, timeout=10)
-    except Exception as e:
-        print(f"Failed to connect: {e}")
-        sys.exit(1)
-        
+    print("=== Proxmox VE Initial Setup ===")
+    ensure_local_ssh_key()
+
+    print("Connecting to Proxmox VE via SSH...")
+    client = get_ssh_client()
     print("Connected successfully!")
-    
-    # 1. Create API Token
+
+    # 1. Install SSH public key for passwordless access
+    pub_key_path = f"{KEY_FILE}.pub"
+    if os.path.exists(pub_key_path):
+        with open(pub_key_path) as f:
+            pub_key = f.read().strip()
+        print("Installing SSH public key on Proxmox host...")
+        install_key_cmd = f"mkdir -p /root/.ssh && grep -qF '{pub_key}' /root/.ssh/authorized_keys 2>/dev/null || echo '{pub_key}' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys"
+        exec_ssh(client, install_key_cmd)
+
+    # 2. Create API Token
     print("Creating API token 'lxc-token' for root@pam...")
-    # First delete existing if any
-    stdin, stdout, stderr = client.exec_command("pveum user token delete root@pam lxc-token 2>/dev/null || true")
-    stdout.channel.recv_exit_status()
-    
-    stdin, stdout, stderr = client.exec_command("pveum user token add root@pam lxc-token --privsep 0 --output-format json")
-    token_output = stdout.read().decode().strip()
-    status = stdout.channel.recv_exit_status()
-    
-    if status != 0:
-        # Fallback without json format
-        stdin, stdout, stderr = client.exec_command("pveum user token add root@pam lxc-token --privsep 0")
-        token_output = stdout.read().decode().strip()
-        print("Raw token output:", token_output)
-    
-    token_value = None
-    # Look for UUID or value in output
+    exec_ssh(client, "pveum user token delete root@pam lxc-token 2>/dev/null || true", check=False)
+    out, _, code = exec_ssh(client, "pveum user token add root@pam lxc-token --privsep 0 --output-format json", check=False)
+
+    token_output = out.strip()
+    if code != 0 or not token_output:
+        out, _, _ = exec_ssh(client, "pveum user token add root@pam lxc-token --privsep 0")
+        token_output = out.strip()
+
     match = re.search(r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})', token_output)
-    if match:
-        token_value = match.group(1)
-        print(f"Found Token Secret: {token_value}")
-    else:
-        print(f"Could not parse token secret from: {token_output}")
+    if not match:
+        print(f"Could not parse token secret from: {token_output}", file=sys.stderr)
         sys.exit(1)
-        
-    # 2. Update appliance catalog
+    token_value = match.group(1)
+    print(f"API Token generated: {token_value}")
+
+    # 3. Update appliance catalog
     print("Updating appliance template catalog (pveam update)...")
-    stdin, stdout, stderr = client.exec_command("pveam update")
-    print(stdout.read().decode().strip())
-    
-    # 3. Find Debian 12 template
-    print("Finding Debian 12 template...")
-    stdin, stdout, stderr = client.exec_command("pveam available --section system | grep debian-12 | awk '{print $2}' | sort -V | tail -n 1")
-    template_name = stdout.read().decode().strip()
-    if not template_name:
-        template_name = "debian-12-standard_12.7-1_amd64.tar.zst"
+    out, _, _ = exec_ssh(client, "pveam update")
+    print(out.strip())
+
+    # 4. Find latest Debian 12 template
+    print("Checking available Debian 12 template...")
+    out, _, _ = exec_ssh(client, "pveam available --section system | grep debian-12 | awk '{print $2}' | sort -V | tail -n 1")
+    template_name = out.strip() or "debian-12-standard_12.12-1_amd64.tar.zst"
     print(f"Target template: {template_name}")
-    
-    # Check if already downloaded
-    stdin, stdout, stderr = client.exec_command(f"pveam list local | grep {template_name} || true")
-    existing = stdout.read().decode().strip()
-    if not existing:
+
+    out, _, _ = exec_ssh(client, f"pveam list local | grep {template_name} || true")
+    if not out.strip():
         print(f"Downloading template {template_name} to local storage...")
-        stdin, stdout, stderr = client.exec_command(f"pveam download local {template_name}")
-        while not stdout.channel.exit_status_ready():
-            line = stdout.readline()
-            if line:
-                print(line.strip())
+        exec_ssh(client, f"pveam download local {template_name}")
         print("Template download completed!")
     else:
-        print(f"Template {template_name} is already downloaded.")
-        
-    # 4. Write .env
+        print(f"Template {template_name} is already available.")
+
+    # 5. Write .env
     env_content = f"""PROXMOX_HOST=127.0.0.1
 PROXMOX_PORT=8006
 PROXMOX_USER=root@pam
 PROXMOX_TOKEN_NAME=lxc-token
 PROXMOX_TOKEN_VALUE={token_value}
 PROXMOX_VERIFY_SSL=false
-"""
-    with open("/home/ilay/projects/lxctest/.env", "w") as f:
-        f.write(env_content)
-    print("Wrote .env with Proxmox API token credentials!")
 
-    # 5. Write config.yaml
-    config_content = f"""proxmox:
+PROXMOX_SSH_PORT=2222
+PROXMOX_SSH_USER=root
+PROXMOX_SSH_KEY=id_pve
+"""
+    with open(".env", "w") as f:
+        f.write(env_content)
+    print("Saved active credentials to .env")
+
+    # 6. Write config.yaml if missing
+    if not os.path.exists("config.yaml"):
+        config_content = f"""proxmox:
   node: "pve"
   storage: "local-lvm"
   template_storage: "local"
@@ -113,12 +123,16 @@ network:
   gateway: ""
   firewall: true
 """
-    with open("/home/ilay/projects/lxctest/config.yaml", "w") as f:
-        f.write(config_content)
-    print("Wrote config.yaml!")
+        with open("config.yaml", "w") as f:
+            f.write(config_content)
+        print("Generated config.yaml")
 
     client.close()
-    print("Setup completed successfully!")
+    print("==========================================================")
+    print(" Setup completed successfully!")
+    print(" You can now run: python3 create_lxc.py")
+    print("==========================================================")
+
 
 if __name__ == "__main__":
     main()

@@ -20,6 +20,16 @@ if [ ! -f "$DISK" ]; then
     qemu-img create -f qcow2 "$DISK" 64G
 fi
 
+# Help flag
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    echo "Usage: ./start_vm.sh [--gui]"
+    echo ""
+    echo "Options:"
+    echo "  --gui    Open a graphical GTK window on your desktop (in addition to VNC)"
+    echo "  (default runs headless with VNC accessible at vnc://127.0.0.1:5900)"
+    exit 0
+fi
+
 # Determine display mode: headless with VNC by default, or GTK if --gui is passed
 DISPLAY_ARGS=(-display none -vnc 127.0.0.1:0)
 if [[ "${1:-}" == "--gui" ]]; then
